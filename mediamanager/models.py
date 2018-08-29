@@ -1,3 +1,5 @@
+import re
+
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres import search
@@ -343,22 +345,32 @@ class Scraper(models.Model):
     scraper_source = models.CharField(max_length=255, choices=(
         ('imdb', 'ImDB'),
         ('thetvdb', 'The TV DB'),
+        ('themoviedb', 'The Movie DB.org'),
         ('fernsehserien.de', 'fernsehserien.de'),
     ))
     scraper_id = models.IntegerField(null=True, blank=True)
     scraper_url = models.CharField(max_length=255, null=True, blank=True, help_text="With tailing /")
     scraper_priority = models.IntegerField(default=0)
+    orig_language = models.CharField(max_length=3, choices=(
+        ('de', 'Deutsch (de)'),
+        ('en', 'English (en)'),
+    ), default='en')
 
     def __unicode__(self):
         return self.name
 
-    def scrape_thetvdb(self, show):
-        language = 'de'
+    def scrape_thetvdb(self, show, language='de'):
         import tvdb_api
+
+        print "Fetching data from tvdb_api", show, language
 
         t = tvdb_api.Tvdb(language=language)
         t._getShowData(self.scraper_id, language)
         t_show = t.shows.get(self.scraper_id)
+
+        is_orig_lang = language == self.orig_language
+
+        print " - is_orig_lang", is_orig_lang, language, "==", self.orig_language
 
         for season_nr, episodes in t_show.items():
             show_season, show_season_created = ShowSeason.objects.get_or_create(
@@ -366,20 +378,86 @@ class Scraper(models.Model):
                 nr=season_nr
             )
             for episode_nr, episode_data in episodes.items():
+                field = 'name'
+                if is_orig_lang:
+                    field = 'orig_name'
+                episode_name = episode_data.get(u'episodeName', None)
                 show_episode, show_episode_created = ShowEpisode.objects.get_or_create(
                     season=show_season,
                     nr=episode_nr,
                     defaults={
-                        'name': episode_data.get(u'episodeName', None)
+                        field: episode_name
+                    }
+                )
+                current_name = getattr(show_episode, field)
+                if episode_name != current_name:
+                    setattr(show_episode, field, episode_name)
+                    show_episode.save()
+
+    def scrape_themovie_db(self, show):
+        from mediamanager.scrapers import themoviedb
+        results = themoviedb.scrape_show(self.scraper_id)
+
+        for season_nr, episodes in results.items():
+            show_season, show_season_created = ShowSeason.objects.get_or_create(
+                show=show,
+                nr=season_nr
+            )
+            for episode_nr, episode_name in episodes.items():
+                show_episode, show_episode_created = ShowEpisode.objects.get_or_create(
+                    season=show_season,
+                    nr=episode_nr,
+                    defaults={
+                        'name': episode_name
                     }
                 )
 
     def scrape_fernsehserien_de(self, show):
-        pass
+        from mediamanager.scrapers import fernsehserien
+        row_data = fernsehserien.scrape(self.scraper_url)
+        data_cnt = len(row_data)
+        matched_cnt = 0
+        match_similarity = 0.6
+        assign_similarity = 0.7
+        for episode_dict in row_data:
+            orig_name = episode_dict['orig_title']
+            assign_name = episode_dict['title']
+            if assign_name:
+                orig_name_matched_episodes = ShowEpisode.objects.annotate(
+                    similarity=search.TrigramSimilarity(
+                        'orig_name', orig_name
+                    )
+                ).filter(
+                    similarity__gt=match_similarity,
+                    orig_name__isnull=False,
+                    name__isnull=True,
+                    season__show=show
+                ).order_by('-similarity')
+
+                first_match = orig_name_matched_episodes.filter(similarity__gt=assign_similarity).first()
+                #print "Matched FS.de orig_title", orig_name, "with ShowEpisode", orig_name_matched_episodes, first_match
+                if first_match:
+                    matched_cnt += 1
+                    first_match.name = episode_dict['title']
+                    first_match.save()
+
+                else:
+                    lower_matched = orig_name_matched_episodes.filter(similarity__lte=assign_similarity)
+                    if lower_matched.exists():
+                        print " - Lower for", orig_name
+                        for low_ep in lower_matched:
+                            print "   - ", low_ep, low_ep.orig_name
+
+        print "Matched %d of %d (sim=%f)" % (matched_cnt, data_cnt, match_similarity)
 
     def process_show(self, show):
         if self.scraper_source == 'thetvdb' and self.scraper_id:
-            return self.scrape_thetvdb(show)
+            if show.language != self.orig_language:
+                # get orig language first
+                self.scrape_thetvdb(show, language=self.orig_language)
+            self.scrape_thetvdb(show)
+        elif self.scraper_source == 'themoviedb' and self.scraper_id:
+            return self.scrape_themovie_db(show)
         elif self.scraper_source == 'fernsehserien.de' and self.scraper_url:
             return self.scrape_fernsehserien_de(show)
 
@@ -405,6 +483,7 @@ class ShowEpisode(models.Model):
     season = models.ForeignKey(ShowSeason)
     nr = models.IntegerField()
     name = models.CharField(max_length=255, null=True, blank=True)
+    orig_name = models.CharField(max_length=255, null=True, blank=True)
 
     def __unicode__(self):
         return u'%(show)s %(ep_nr)sx%(nr)s' % {
@@ -516,6 +595,8 @@ class FileResource(models.Model):
                 current = fileutils.filesize(dest_path)
             else:
                 current = 0
+        if saved_size == 0:
+            return 0
         return (float(current) / float(saved_size)) * 100.
 
     def is_completed(self):
@@ -577,6 +658,52 @@ class FileResource(models.Model):
                 except (IOError, enzyme.MalformedMKVError):
                     print "Error reading", self.file_path
 
+    def assign_by_filename(self):
+        matched_show = None
+        episode_resource = None
+        if self.show_storage:
+            matched_show = self.show_storage.show
+
+        if matched_show:
+            fn = self.get_basename()
+            seps = [
+                u' (odc. ',
+                u'x',
+                u'-afl ',  # hollandse, KetOp12
+                u'-ep ',   # french, Boomerang
+            ]
+            part_a, part_b = None, None
+            for sep in seps:
+                if sep in fn:
+                    try:
+                        splitted = fn.split(sep)
+                        part_a, part_b = splitted[0:2]
+                    except IndexError:
+                        pass
+
+            if part_a and part_b:
+                part_a_ints = [int(a) for a in re.findall('\d+', part_a)]
+                part_b_ints = [int(b) for b in re.findall('\d+', part_b)]
+                part_a_int, part_b_int = None, None
+                if part_a_ints:
+                    part_a_int = part_a_ints[-1]
+                if part_b_ints:
+                    part_b_int = part_b_ints[0]
+
+                if part_a_int is not None and part_b_int is not None:
+                    matched_episode = ShowEpisode.objects.filter(season__show=matched_show, season__nr=part_a_int, nr=part_b_int).first()
+                    if matched_episode:
+                        episode_resource, er_created = EpisodeResource.objects.get_or_create(
+                            episode=matched_episode,
+                            file_res=self,
+                            defaults={
+                                'match_similarity': 1,
+                                'match_method': u'v3,assign_by_filename'
+                            }
+                        )
+
+        return episode_resource
+
     def auto_assign(self):
         results = {
             'episode_resources': [],
@@ -619,12 +746,8 @@ class FileResource(models.Model):
 
                 if other_matched.exists():
                     matched_episode = other_matched.filter(similarity__gt=0.3).first()
-
-                    print "  - other_matched <= 0.3:"
-                    for matched in other_matched:
-                        print "   - ", matched.name, "vs.", self.md_summary, matched.similarity * 100., "%"
-
                     if matched_episode:
+                        print "  - other_matched <= 0.3:", matched_episode.name, "vs.", self.md_summary, matched_episode.similarity * 100., "%"
                         er, er_created = EpisodeResource.objects.get_or_create(
                             episode=matched_episode,
                             file_res=file_res,
@@ -679,6 +802,11 @@ class FileResource(models.Model):
                 if not results['episode_resources']:
                     for qn in query_names_md_description:
                         lookup_query_name(file_res=self, query_name=qn, query_by='md_description', fallback=False)
+
+        if not self.episoderesource_set.exists():
+            matched_er_by_fn = self.assign_by_filename()
+            if matched_er_by_fn:
+                results['episode_resources'].append(matched_er_by_fn)
 
         return results
 

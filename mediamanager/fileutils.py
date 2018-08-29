@@ -14,6 +14,8 @@ def move_file(src, dst, file_res_id, show_storage_id, so1_id):
     dest_show_storage = models.ShowStorage.objects.get(id=show_storage_id)
     so1 = models.StorageDiskOperation.objects.get(id=so1_id)
 
+    print "* start moving from", src, "to", dst
+
     try:
         start = datetime.datetime.now()
         # use copy instead of copy2 to avoid copystat()

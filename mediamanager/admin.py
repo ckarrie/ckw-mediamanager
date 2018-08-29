@@ -266,16 +266,18 @@ class VideoResFilter(admin.SimpleListFilter):
 
 
 class ShowEpisodeAdmin(admin.ModelAdmin):
-    list_display = ['season_show', 'season', 'nr', 'name', 'episoderesource_cnt', 'get_show_storages_text', 'fr_links']
+    list_display = ['season_show', 'season', 'nr', 'name', 'orig_name',
+                    'episoderesource_cnt', 'get_show_storages_text', 'fr_links']
     list_filter = [
         'season__show',
         'episoderesource__file_res__show_storage__storagefolder__disk',
         'episoderesource__file_res__show_storage__storagefolder__disk__server',
-        'episoderesource__file_res__md_channel',
+        #'episoderesource__file_res__md_channel',
         'episoderesource__file_res__md_video_height',
-        VideoResFilter
+        VideoResFilter,
+        'season__show__auto_assign_multiep'
     ]
-    search_fields = ['name']
+    search_fields = ['name', 'orig_name']
     actions = ['delete_smaller_duplicates', 'delete_greatest_duplicate', 'rename_file_res']
 
     def get_actions(self, request):
@@ -380,9 +382,14 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
 
 
 class EpisodeResourceAdmin(admin.ModelAdmin):
-    list_display = ['episode', 'episode_name', 'file_base', 'file_md_title', 'file_md_summary', 'file_md_size', 'get_rename_filename', 'is_renamed']
+    list_display = [
+        'episode', 'episode_name',
+        'file_base', 'file_md_title', 'file_md_summary',
+        'file_md_size', 'get_rename_filename', 'is_renamed',
+        'match_similarity', 'match_method'
+    ]
     actions = ['delete_from_disk', 'rename_file_res']
-    list_filter = ['episode__season__show']
+    list_filter = ['episode__season__show', 'match_method', 'episode__season__show__auto_assign_multiep']
     raw_id_fields = ['episode', 'file_res']
 
     def episode_name(self, obj):

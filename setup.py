@@ -23,6 +23,7 @@ setup(
         'enzyme',
         'psycopg2',
         'lxml',
-        'django-background-tasks'
+        'django-background-tasks',
+        'tmdb3'
     ]
 )
