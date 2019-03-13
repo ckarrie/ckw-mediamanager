@@ -10,4 +10,3 @@ class FileResourceAdminForm(forms.ModelForm):
             'md_summary': forms.Textarea(attrs={'cols': 30, 'rows': 2})
         }
 
-

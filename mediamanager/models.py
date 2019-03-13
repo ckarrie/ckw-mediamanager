@@ -1,9 +1,12 @@
 import re
+from collections import OrderedDict
+from itertools import chain
 
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres import search
 from django.db import models
+from django.utils import timezone
 
 from django.apps import apps
 
@@ -294,19 +297,34 @@ class ShowStorage(models.Model):
     def __unicode__(self):
         return self.path
 
-    def scan_files(self, read_metadata=False):
+    def scan_files(self, read_metadata=False, limit_filename=None):
         results = {
             'added': 0,
             'updated': 0,
-            'files': 0
+            'files': 0,
+            'fileresources': []
         }
-        for videofile in glob.glob(self.path + '*.mkv'):
+
+        videofiles = []
+        if limit_filename:
+            videofile = os.path.join(self.path, limit_filename)
+            if os.path.exists(videofile):
+                videofiles = [videofile]
+
+        else:
+            video_file_types = ['*.mkv', '*.flv', '*.avi', '*.m4v', '*.mp4']
+            for file_type in video_file_types:
+                for videofile in glob.glob(self.path + file_type):
+                    videofiles.append(videofile)
+
+        for videofile in videofiles:
             fr, fr_created = FileResource.objects.get_or_create(
                 file_path=videofile,
                 defaults={
                     'show_storage': self
                 }
             )
+            results['fileresources'].append(fr)
             try:
                 size = int(os.stat(videofile).st_size)
             except OSError:
@@ -324,6 +342,10 @@ class ShowStorage(models.Model):
             results['files'] += 1
 
         return results
+
+    def get_folder_size(self):
+        size = self.fileresource_set.filter(file_size__gt=0).aggregate(size_sum=models.Sum('file_size')).get('size_sum') or 0
+        return size
 
     def cleanup_nonexisting_filesres(self):
         cnt_deleted = 0
@@ -394,9 +416,10 @@ class Scraper(models.Model):
                     setattr(show_episode, field, episode_name)
                     show_episode.save()
 
-    def scrape_themovie_db(self, show):
+    def scrape_themovie_db(self, show, language='de'):
         from mediamanager.scrapers import themoviedb
-        results = themoviedb.scrape_show(self.scraper_id)
+        is_orig_lang = language == self.orig_language
+        results = themoviedb.scrape_show(self.scraper_id, language=language)
 
         for season_nr, episodes in results.items():
             show_season, show_season_created = ShowSeason.objects.get_or_create(
@@ -404,13 +427,21 @@ class Scraper(models.Model):
                 nr=season_nr
             )
             for episode_nr, episode_name in episodes.items():
+                field = 'name'
+                if is_orig_lang:
+                    field = 'orig_name'
                 show_episode, show_episode_created = ShowEpisode.objects.get_or_create(
                     season=show_season,
                     nr=episode_nr,
                     defaults={
-                        'name': episode_name
+                        field: episode_name
                     }
                 )
+
+                current_name = getattr(show_episode, field)
+                if episode_name != current_name:
+                    setattr(show_episode, field, episode_name)
+                    show_episode.save()
 
     def scrape_fernsehserien_de(self, show):
         from mediamanager.scrapers import fernsehserien
@@ -457,7 +488,9 @@ class Scraper(models.Model):
                 self.scrape_thetvdb(show, language=self.orig_language)
             self.scrape_thetvdb(show)
         elif self.scraper_source == 'themoviedb' and self.scraper_id:
-            return self.scrape_themovie_db(show)
+            if show.language != self.orig_language:
+                self.scrape_themovie_db(show, language=self.orig_language)
+            self.scrape_themovie_db(show)
         elif self.scraper_source == 'fernsehserien.de' and self.scraper_url:
             return self.scrape_fernsehserien_de(show)
 
@@ -495,30 +528,70 @@ class ShowEpisode(models.Model):
     def delete_smaller_duplicates(self):
         episoderesources = self.episoderesource_set.all()
         freed_disk_space_by_discs = {}
-        small_frs = []
+        failed_deleted_files = []
         if episoderesources.count() > 1:
             all_by_size = episoderesources.order_by('-file_res__file_size')
-            # first_by_size = all_by_size.first()
-            smaller = all_by_size[1:]
-            for small in smaller:
-                show_storage = small.file_res.show_storage
-                if show_storage:
-                    disk = show_storage.storagefolder.disk
-                else:
-                    disk = None
+            if self.season.show.auto_assign_multiep:
+                duplicate_fr_ids = []
+                matched_fileresources = []
+                for er in episoderesources:
+                    matched_fileresources.append(er.file_res)
 
-                if disk in freed_disk_space_by_discs.keys():
-                    freed_disk_space_by_discs[disk] += small.file_res.file_size
-                else:
-                    freed_disk_space_by_discs[disk] = small.file_res.file_size
+                fr_episodes = OrderedDict()
+                for fr in matched_fileresources:
+                    fr_episodes_qs = ShowEpisode.objects.filter(episoderesource__file_res=fr).order_by('pk')
+                    episodes_list = list(set([ep.id for ep in fr_episodes_qs]))
+                    key = fr.id
+                    if key in fr_episodes.keys():
+                        fr_episodes[key] = list(set(fr_episodes[key] + episodes_list))
+                    else:
+                        fr_episodes[key] = episodes_list
 
-                if small.file_res.episoderesource_set.count() > 1:
-                    small_frs.append(small.file_res.id)
-                else:
-                    small.delete_from_disk()
+                for fr_id, episodes_ids in fr_episodes.items():
+                    other_frs = FileResource.objects.filter(episoderesource__episode__id__in=episodes_ids).exclude(id=fr_id).distinct()
+                    other_frs_ids = list(other_frs.values_list('id', flat=True))
+                    duplicate_fr_ids.extend(other_frs_ids)
+                    print self, "other_frs", other_frs.count(), other_frs_ids
 
-        print "small_frs", small_frs
-        return freed_disk_space_by_discs
+                all_by_size = FileResource.objects.filter(id__in=duplicate_fr_ids).order_by('-file_size')
+                print self, "to delete (except first)", all_by_size.values_list('id', flat=True)
+                for fr in all_by_size[1:]:
+                    show_storage = fr.show_storage
+                    if show_storage:
+                        disk = show_storage.storagefolder.disk
+                    else:
+                        disk = None
+                    if disk in freed_disk_space_by_discs.keys():
+                        freed_disk_space_by_discs[disk] += fr.file_size
+                    else:
+                        freed_disk_space_by_discs[disk] = fr.file_size
+                    file_deleted = fr.delete_from_disk()
+                    if file_deleted:
+                        fr.delete()
+                    else:
+                        failed_deleted_files.append(fr)
+
+            else:
+                smaller = all_by_size[1:]
+                for small in smaller:
+                    show_storage = small.file_res.show_storage
+                    if show_storage:
+                        disk = show_storage.storagefolder.disk
+                    else:
+                        disk = None
+
+                    if disk in freed_disk_space_by_discs.keys():
+                        freed_disk_space_by_discs[disk] += small.file_res.file_size
+                    else:
+                        freed_disk_space_by_discs[disk] = small.file_res.file_size
+
+                    file_deleted = small.delete_from_disk()
+                    if not file_deleted:
+                        failed_deleted_files.append(small)
+
+
+        #print "small_frs", small_frs
+        return freed_disk_space_by_discs, failed_deleted_files
 
     def delete_greatest_duplicate(self):
         episoderesources = self.episoderesource_set.all()
@@ -527,7 +600,6 @@ class ShowEpisode(models.Model):
             all_by_size = episoderesources.order_by('-file_res__file_size')
             greatest = all_by_size.first()
             greatest.delete_from_disk()
-
 
     class Meta:
         ordering = ('season', 'nr')
@@ -627,34 +699,35 @@ class FileResource(models.Model):
 
     def read_metadata(self):
         if self.file_exists():
-            import enzyme
-            with open(self.file_path, 'rb') as f:
+            if self.file_path.endswith('.mkv'):
+                import enzyme
                 try:
-                    mkv = enzyme.MKV(f)
-                    self.md_title = mkv.info.title
-                    if mkv.info.duration:
-                        self.md_duration = mkv.info.duration.total_seconds()
-                    else:
-                        self.md_duration = -1
-                    vtrack = mkv.video_tracks[0]
-                    self.md_video_width = vtrack.width
-                    self.md_video_height = vtrack.height
-                    for tag in mkv.tags:
-                        for st in tag.simpletags:
-                            if st.name == 'TVCHANNEL':
-                                self.md_channel = st.string[:500]
-                            elif st.name == 'SUMMARY':
-                                string = st.string[:500]
-                                if string and u', ' in string:
-                                    if string.count(u", ") >= 2:
-                                        string_list = string.split(u", ")
-                                        string = u", ".join(string_list[:len(string_list) - 2])
-                                if not self.md_summary:
-                                    self.md_summary = string
-                                self.md_summary_raw = st.string
-                            elif st.name == 'DESCRIPTION':
-                                self.md_description = st.string
-                    self.save()
+                    with open(self.file_path, 'rb') as f:
+                        mkv = enzyme.MKV(f)
+                        self.md_title = mkv.info.title
+                        if mkv.info.duration:
+                            self.md_duration = mkv.info.duration.total_seconds()
+                        else:
+                            self.md_duration = -1
+                        vtrack = mkv.video_tracks[0]
+                        self.md_video_width = vtrack.width
+                        self.md_video_height = vtrack.height
+                        for tag in mkv.tags:
+                            for st in tag.simpletags:
+                                if st.name == 'TVCHANNEL':
+                                    self.md_channel = st.string[:500]
+                                elif st.name == 'SUMMARY':
+                                    string = st.string[:500]
+                                    if string and u', ' in string:
+                                        if string.count(u", ") >= 2:
+                                            string_list = string.split(u", ")
+                                            string = u", ".join(string_list[:len(string_list) - 2])
+                                    if not self.md_summary:
+                                        self.md_summary = string
+                                    self.md_summary_raw = st.string
+                                elif st.name == 'DESCRIPTION':
+                                    self.md_description = st.string
+                        self.save()
                 except (IOError, enzyme.MalformedMKVError):
                     print "Error reading", self.file_path
 
@@ -704,10 +777,65 @@ class FileResource(models.Model):
 
         return episode_resource
 
+    def assign_by_title_in_filename(self):
+        """
+
+        :return:
+        """
+        matched_show = None
+        episode_resource = None
+        if self.show_storage:
+            matched_show = self.show_storage.show
+
+        if matched_show:
+            fn = self.get_basename()
+            if '.' in fn:
+                show_title = fn.split('.')[0]
+                episode_title = fn.split('.')[1]
+                if ' - ' in show_title:
+                    show_title = show_title.split(' - ')[0]
+
+                if episode_title:
+                    print "Looking up '%s'" % episode_title
+                    matched_episodes = ShowEpisode.objects.annotate(
+                        name_similarity=search.TrigramSimilarity(
+                            'name', episode_title
+                        ),
+                        orig_name_similarity=search.TrigramSimilarity(
+                            'orig_name', episode_title
+                        )
+                    ).filter(
+                        models.Q(name__isnull=False) | models.Q(orig_name__isnull=False),
+                        season__show=matched_show
+                    ).order_by('-name_similarity', '-orig_name_similarity')
+
+                    matched_episodes = matched_episodes.filter(
+                        models.Q(name_similarity__gt=0.4) | models.Q(orig_name_similarity__gt=0.4),
+                    )
+
+                    if matched_episodes.count() == 1:
+                        matched_episode = matched_episodes.first()
+                        by_name = 'name'
+                        similarity = matched_episode.name_similarity
+                        if matched_episode.orig_name_similarity > matched_episode.name_similarity:
+                            by_name = 'orig_name'
+                            similarity = matched_episode.orig_name_similarity
+                        episode_resource, er_created = EpisodeResource.objects.get_or_create(
+                            episode=matched_episode,
+                            file_res=self,
+                            defaults={
+                                'match_similarity': similarity,
+                                'match_method': u'v4,assign_by_title_in_filename,%(by_name)s' % {'by_name': by_name}
+                            }
+                        )
+
+        return episode_resource
+
     def auto_assign(self):
         results = {
             'episode_resources': [],
         }
+        matched_show = None
 
         def lookup_query_name(file_res, query_name, query_by, fallback=False):
             er = None
@@ -759,7 +887,6 @@ class FileResource(models.Model):
                         results['episode_resources'].append(er)
 
         if self.md_summary or (self.md_duration > 0 and self.md_title):
-            matched_show = None
             if self.show_storage:
                 matched_show = self.show_storage.show
 
@@ -808,11 +935,37 @@ class FileResource(models.Model):
             if matched_er_by_fn:
                 results['episode_resources'].append(matched_er_by_fn)
 
+        file_similarity_thresold = 0.5
+        if not self.episoderesource_set.filter(match_similarity__gte=file_similarity_thresold).exists():
+            matched_er_by_title_in_fn = self.assign_by_title_in_filename()
+            if matched_er_by_title_in_fn:
+                results['episode_resources'].append(matched_er_by_title_in_fn)
+
+        # cleanup lower episode resources
+        if matched_show and not matched_show.auto_assign_multiep:
+            ordered_ers = self.episoderesource_set.all().order_by('-match_similarity')
+            if ordered_ers.count() > 1:
+                cleanuped_ers = 0
+                top_match = ordered_ers.first()
+                other_ers = ordered_ers.exclude(pk=top_match.pk)
+                for other in other_ers:
+                    other.delete()
+                    cleanuped_ers += 1
+
+                results['episode_resources'] = [top_match]
+                results['cleanuped_ers'] = cleanuped_ers
+
         return results
 
     def delete_from_disk(self):
+        deleted = False
         if self.file_exists():
-            os.remove(self.file_path)
+            try:
+                os.remove(self.file_path)
+                deleted = True
+            except IOError:
+                pass
+        return deleted
 
     class Meta:
         ordering = ('show_storage', 'file_path')
@@ -823,6 +976,7 @@ class EpisodeResource(models.Model):
     file_res = models.ForeignKey(FileResource)
     match_similarity = models.FloatField(default=1)
     match_method = models.CharField(max_length=255, null=True, blank=True)
+    created = models.DateTimeField(null=True, blank=True)
 
     def get_rename_filename(self):
         episode_resources = self.file_res.episoderesource_set.all().order_by('episode__season__nr', 'episode__nr')
@@ -846,9 +1000,10 @@ class EpisodeResource(models.Model):
     is_renamed.boolean = True
 
     def delete_from_disk(self):
-        self.file_res.delete_from_disk()
+        file_deleted = self.file_res.delete_from_disk()
         self.file_res.delete()
         self.delete()
+        return file_deleted
 
     def rename_file_res(self):
         new_fn = self.get_rename_filename()
@@ -874,6 +1029,11 @@ class EpisodeResource(models.Model):
             'is_completed': is_completed,
             'renamed': renamed,
         }
+
+    def save(self, *args, **kwargs):
+        if not self.created:
+            self.created = timezone.now()
+        return super(EpisodeResource, self).save(*args, **kwargs)
 
     class Meta:
         ordering = ('episode', '-file_res__file_size')

@@ -1,0 +1,4 @@
+syntax: glob
+.idea/*
+ckw_mediamanager.egg-info/*
+*.pyc

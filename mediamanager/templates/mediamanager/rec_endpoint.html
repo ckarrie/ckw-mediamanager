@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>REC ENDPOINT</title>
+</head>
+<body>
+    <h1>REC ENDPOINT</h1>
+    <p>FN={{ fn }}</p>
+
+    <hr >
+    <h2>Matched Episodes:</h2>
+    <ul>
+        {% for er in episode_resources %}
+            <li>{{ er.match_similarity }} {{ er.episode.name }}</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>

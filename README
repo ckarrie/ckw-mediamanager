@@ -7,6 +7,9 @@ gio mount -a smb://neo-ckw-001.local/usb_dagobert
 gio mount -a smb://neo-ckw-001.local/usb_goofy
 gio mount -a smb://neo-ckw-001.local/usb_kaese
 
+cd ~/mounts/
+sudo sshfs -o allow_other ts@192.168.178.33:/home/ts/Videos tvserver
+
 
 Start:
 screen -S mm
@@ -36,6 +39,17 @@ cd ~/workspace/venvs/mediamanager
 source bin/activate
 python mm/manage.py process_tasks --queue disk-move-micky
 
+cd ~/workspace/venvs/mediamanager
+source bin/activate
+python mm/manage.py process_tasks --queue disk-move-dori1
+
+cd ~/workspace/venvs/mediamanager
+source bin/activate
+python mm/manage.py process_tasks --queue disk-move-nzxt_daten
+
+cd ~/workspace/venvs/mediamanager
+source bin/activate
+python mm/manage.py process_tasks --queue disk-move-tvh
 
 
 

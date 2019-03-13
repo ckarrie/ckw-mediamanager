@@ -69,7 +69,7 @@ class StorageFolderAdmin(admin.ModelAdmin):
 
 
 class ShowStorageAdmin(admin.ModelAdmin):
-    list_display = ['show', 'storagefolder', 'path']
+    list_display = ['show', 'storagefolder', 'path', 'fileres_size']
     actions = ['scan_files', 'scan_files_and_read_metadata', 'cleanup_nonexisting_filesres']
     list_filter = ['storagefolder__disk']
 
@@ -85,6 +85,9 @@ class ShowStorageAdmin(admin.ModelAdmin):
 
     def scan_files_and_read_metadata(self, request, queryset):
         return self.scan_files(request, queryset, read_metadata=True)
+
+    def fileres_size(self, obj):
+        return filesizeformat(obj.get_folder_size())
 
     def cleanup_nonexisting_filesres(self, request, queryset):
         for obj in queryset:
@@ -192,8 +195,9 @@ class ShowAdmin(admin.ModelAdmin):
             })
 
     def assigned_ers(self, obj):
-        return mark_safe(u'<a href="%(ers_url)s" title="Episode Resources">%(assigned_ers_cnt)s</a> / <a href="%(files_url)s" title="File Resource">%(files_cnt)s</a> / <a href="%(episodes_url)s" title="Total Episode">%(episodes_cnt)d</a>' % {
+        return mark_safe(u'<a href="%(ers_url)s" title="Episode Resources">%(assigned_ers_cnt)s</a> / %(assigned_eps)d / <a href="%(files_url)s" title="File Resource">%(files_cnt)s</a> / <a href="%(episodes_url)s" title="Total Episode">%(episodes_cnt)d</a>' % {
             'assigned_ers_cnt': models.EpisodeResource.objects.filter(episode__season__show=obj).count(),
+            'assigned_eps': models.ShowEpisode.objects.filter(season__show=obj, episoderesource__isnull=False).distinct().count(),
             'files_cnt': models.FileResource.objects.filter(show_storage__show=obj).count(),
             'ers_url': reverse('admin:mediamanager_episoderesource_changelist') + '?episode__season__show__id__exact=' + str(obj.id),
             'files_url': reverse('admin:mediamanager_fileresource_changelist') + '?show_storage__show__id__exact=' + str(obj.id),
@@ -356,10 +360,11 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
     def delete_smaller_duplicates(self, request, queryset):
         freed_by_disk = {}
         freed_by_disk_text = []
+        failed_deleted_files = []
 
         for obj in queryset:
             print "Processing deletion for", obj.id
-            data_by_disks = obj.delete_smaller_duplicates()
+            data_by_disks, failed_deleted_files = obj.delete_smaller_duplicates()
             for k, v in data_by_disks.items():
                 if k in freed_by_disk.keys():
                     freed_by_disk[k] += v
@@ -376,6 +381,12 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
             'text': u", ".join(freed_by_disk_text)
         })
 
+        if failed_deleted_files:
+            for dfd in failed_deleted_files:
+                self.message_user(request, u"Failed deleting %(path)s" % {
+                    'path': dfd.file_path
+                }, level=messages.WARNING)
+
     def delete_greatest_duplicate(self, request, queryset):
         for obj in queryset:
             data_by_disks = obj.delete_greatest_duplicate()
@@ -386,7 +397,8 @@ class EpisodeResourceAdmin(admin.ModelAdmin):
         'episode', 'episode_name',
         'file_base', 'file_md_title', 'file_md_summary',
         'file_md_size', 'get_rename_filename', 'is_renamed',
-        'match_similarity', 'match_method'
+        'match_similarity', 'match_method',
+        'created'
     ]
     actions = ['delete_from_disk', 'rename_file_res']
     list_filter = ['episode__season__show', 'match_method', 'episode__season__show__auto_assign_multiep']
