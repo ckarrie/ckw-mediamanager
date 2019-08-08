@@ -1,12 +1,16 @@
-Media Manager
-=============
+# Media Manager
 
-1. create python 2 venv and install ckw-mediamanager
-2. `(mediamanager)christian@nzxt:~/workspace/venvs/mediamanager$ pip install -e ~/src/ckw-mediamanager`
-3. `(mediamanager) christian@nzxt:~/workspace/venvs/mediamanager$ pip install django==1.11.9`
+*Media Manager* is a Django Web App to manage your recorded TV Shows. It can act as an endpoint for TVHeadend's DVR. 
 
+## Features
 
-== Screenshots: ==
+- Scraper (= where we get the episode numbers and titles from) for <TheMovieDB.org>
+- Scraper for <fernsehserien.de>
+- can assign episode nr and seasons nr via episode title
+- supports mkv metadata
+- your media can lay across different storage's, i.e. episodes of one show spreaded on different harddisc's
+
+## Screenshots
 
 List your DVR recorded TV shows:
 
@@ -15,6 +19,15 @@ List your DVR recorded TV shows:
 List your Episodes:
 
 ![Episodes](showepisodes.png)
+
+## Installation
+
+1. create python 2 venv and install ckw-mediamanager
+2. `(mediamanager)christian@nzxt:~/workspace/venvs/mediamanager$ pip install -e ~/src/ckw-mediamanager`
+3. `(mediamanager) christian@nzxt:~/workspace/venvs/mediamanager$ pip install django==1.11.9`
+
+
+## Usage
 
 
 Start:
