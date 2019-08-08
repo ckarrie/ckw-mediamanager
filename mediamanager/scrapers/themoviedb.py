@@ -1,7 +1,10 @@
 from collections import OrderedDict
+from django.conf import settings
+
+TMDB3_KEY = getattr(settings, 'TMDB3_KEY', None)
 
 import tmdb3
-tmdb3.set_key("2b23f9b92ea22e3dbd8903f39f8d5921")
+tmdb3.set_key(TMDB3_KEY)
 
 
 def scrape_show(show_id, language='de'):
