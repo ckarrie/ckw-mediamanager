@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Media Manager</title>
+</head>
+<body>
+
+<h1>Anleitung Media Manager</h1>
+
+<h2>Workflow vorhandene Serie</h2>
+
+<ol>
+    <li><a href="/admin/mediamanager/show/">Shows</a> Show auswählen</li>
+    <li>Aktion: 1.) Fetch Show data - dies lädt neue Episodennamen in den MM</li>
+    <li>Aktion: 2.) read ShowStorage - aktualisiert die Daten vom Dateisystem</li>
+    <li>Auf Link im Feld "ER BY DISKS" klicken</li>
+</ol>
+
+<h3>FileResource</h3>
+<p>Die Dateien werden den ShowResourcen zugeordnet</p>
+
+<ol>
+    <li>Sehr kleine Dateien löschen</li>
+    <li>Dateien, die Heruntergeladen wurden als "DL" (mark_as_dl) markieren</li>
+
+
+    <li>Fall a): Dateinamen unbrauchbar, Beschreibung in Titelfeld</li>
+    <li>Fall b): Dateinamen unbrauchbar, Titel brauchbar
+        <ul>
+            <li>Auswählen</li>
+            <li>Aktion Auto Assign</li>
+        </ul>
+    </li>
+    <li>Aktion: AutoAssign</li>
+
+</ol>
+
+<h3>ShowEpisode</h3>
+<ol>
+    <li><a href="/admin/mediamanager/showepisode/">ShowEpisode</a> im Filter Show auswählen</li>
+    <li>Alle Auswählen</li>
+    <li>Aktion: Delete TV Duplicates - löscht TV-Aufnahmen falls DL-Dateien existieren</li>
+    <li>Alle Auswählen</li>
+    <li>Aktion: Delete Smaller Files</li>
+    <li>Alle Auswählen</li>
+    <li>Aktion: Rename File Res</li>
+</ol>
+
+
+</body>
+</html>

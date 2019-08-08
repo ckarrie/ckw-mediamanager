@@ -98,7 +98,7 @@ class ShowStorageAdmin(admin.ModelAdmin):
 
 class FileResourceAdmin(admin.ModelAdmin):
     list_display = [
-        'id',
+        'id', 'file_source',
         'get_basename', 'get_disk', 'get_size_display', 'file_size',
         'md_title', 'md_duration', 'md_summary', 'md_summary_raw_icon', 'has_episoderesource', 'md_duration_text', 'running_tasks', 'er_list'
     ]
@@ -107,8 +107,14 @@ class FileResourceAdmin(admin.ModelAdmin):
 
     search_fields = ['md_summary', 'md_description', 'file_path']
     readonly_fields = ['get_current_file_size_display', 'get_size_display', 'get_file_process', 'get_file_process_text', 'get_running_tasks']
-    actions = ['read_metadata', 'auto_assign', 'delete_from_disk', 'assign_show_storage']
-    list_filter = ['show_storage__show', 'show_storage__storagefolder__disk']
+    actions = ['read_metadata', 'auto_assign', 'delete_from_disk', 'assign_show_storage', 'mark_as_dl', 'mark_as_tv']
+    list_filter = ['file_source', 'show_storage__show', 'show_storage__storagefolder__disk']
+
+    def mark_as_dl(self, request, queryset):
+        queryset.update(file_source='dl')
+
+    def mark_as_tv(self, request, queryset):
+        queryset.update(file_source='tv')
 
     def get_changelist_form(self, request, **kwargs):
         kwargs.setdefault('form', forms.FileResourceAdminForm)
@@ -156,8 +162,12 @@ class FileResourceAdmin(admin.ModelAdmin):
         return mark_safe(u' | '.join(ers))
 
     def md_summary_raw_icon(self, obj):
-        return mark_safe(u'<img src="/static/admin/img/icon-unknown.svg" title="%(title)s" />' % {
-            'title': obj.md_summary_raw
+        html = u'<img src="/static/admin/img/icon-unknown.svg" title="%(title)s" />' \
+               u'<a href="https://www.google.com/search?q=%(show)s %(md_summary)s" target="_blank">G</a>'
+        return mark_safe(html % {
+            'title': obj.md_summary_raw,
+            'show': obj.show_storage.show.name,
+            'md_summary': obj.md_summary,
         })
 
     def md_duration_text(self, obj):
@@ -182,7 +192,7 @@ class ScraperAdmin(admin.ModelAdmin):
 
 class ShowAdmin(admin.ModelAdmin):
     list_display = ['name', 'assigned_ers', 'er_by_discs']
-    actions = ['fetch_show_data', 'auto_assign']
+    actions = ['fetch_show_data', 'read_showstorages', 'auto_assign']
 
     def fetch_show_data(self, request, queryset):
         for show in queryset:
@@ -194,8 +204,20 @@ class ShowAdmin(admin.ModelAdmin):
                 'seasons': models.ShowSeason.objects.filter(show=show).count(),
             })
 
+    fetch_show_data.short_description = "1.) fetch Show data"
+
+    def read_showstorages(self, request, queryset):
+        for show in queryset:
+            results = show.read_showstorages()
+            self.message_user(request, u"%(show)s: updated from %(cnt)d ShowStorages" % {
+                'show': show.name,
+                'cnt': len(results)
+            })
+
+    read_showstorages.short_description = "2.) read ShowStorages"
+
     def assigned_ers(self, obj):
-        return mark_safe(u'<a href="%(ers_url)s" title="Episode Resources">%(assigned_ers_cnt)s</a> / %(assigned_eps)d / <a href="%(files_url)s" title="File Resource">%(files_cnt)s</a> / <a href="%(episodes_url)s" title="Total Episode">%(episodes_cnt)d</a>' % {
+        return mark_safe(u'<a href="%(ers_url)s" title="Episode Resources">%(assigned_ers_cnt)s</a>/%(assigned_eps)d / <a href="%(files_url)s" title="File Resource">%(files_cnt)s</a> / <a href="%(episodes_url)s" title="Total Episode">%(episodes_cnt)d</a>' % {
             'assigned_ers_cnt': models.EpisodeResource.objects.filter(episode__season__show=obj).count(),
             'assigned_eps': models.ShowEpisode.objects.filter(season__show=obj, episoderesource__isnull=False).distinct().count(),
             'files_cnt': models.FileResource.objects.filter(show_storage__show=obj).count(),
@@ -228,10 +250,16 @@ class ShowAdmin(admin.ModelAdmin):
                 'disk': disk.name,
                 'cnt_ers': ers_qs.count(),
                 'cnt_frs': frs_qs.count(),
+                'show_id': obj.pk,
             }
 
-            if ers_qs.exists():
-                ers_text.append(u'<code>%(disk)s: <span title="found File Resources">%(cnt_frs)03d</span>/<strong title="assigned Episode Resources">%(cnt_ers)03d</strong></code>' % d)
+            if ers_qs.exists() and ers_qs.count() != frs_qs.count():
+                url = '/admin/mediamanager/fileresource/?show_storage__show__id__exact=%(show_id)d&show_storage__storagefolder__disk__id__exact=%(sf_id)d' % {
+                    'show_id': obj.pk,
+                    'sf_id': disk.pk
+                }
+                d.update(url=url)
+                ers_text.append(u'<code>%(disk)s: <a target="_blank" href="%(url)s"><span title="found File Resources">%(cnt_frs)03d</span>/<strong title="assigned Episode Resources">%(cnt_ers)03d</strong></a></code>' % d)
             else:
                 ers_text.append(u'<code>%(disk)s: <span title="found File Resources">%(cnt_frs)03d</span>/<span title="assigned Episode Resources">%(cnt_ers)03d</span></code>' % d)
         return mark_safe(u'&nbsp;&nbsp;|&nbsp;&nbsp;'.join(ers_text))
@@ -282,7 +310,7 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
         'season__show__auto_assign_multiep'
     ]
     search_fields = ['name', 'orig_name']
-    actions = ['delete_smaller_duplicates', 'delete_greatest_duplicate', 'rename_file_res']
+    actions = ['delete_tv_duplicates', 'delete_smaller_duplicates', 'delete_greatest_duplicate', 'rename_file_res']
 
     def get_actions(self, request):
         actions = super(ShowEpisodeAdmin, self).get_actions(request=request)
@@ -345,7 +373,7 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
     def get_show_storages_text(self, obj):
         storages = []
         for er in obj.episoderesource_set.filter(file_res__show_storage__isnull=False):
-            storages.append(u'<a href="file://%(file_url)s">%(disk)s</a> (%(size)s, %(duration)s, <span title="%(channel)s">%(channel_short)s</span>, <code><strong>%(video_res)s</strong></code>)' % {
+            storages.append(u'<a href="file://%(file_url)s">%(disk)s</a> (%(size)s, %(duration)s, <span title="%(channel)s">%(channel_short)s</span>, <code><strong>%(video_res)s</strong></code>, %(source)s)' % {
                 'disk': er.file_res.show_storage.storagefolder.disk.name,
                 'size': er.file_res.get_size_display(),
                 'file_url': er.file_res.file_path,
@@ -353,9 +381,28 @@ class ShowEpisodeAdmin(admin.ModelAdmin):
                 'channel_short': truncatechars(er.file_res.md_channel, 10),
                 'channel': er.file_res.md_channel,
                 'video_res': er.file_res.get_video_resolution_text(),
+                'source': er.file_res.file_source
             })
 
         return mark_safe(u", ".join(storages))
+
+    def delete_tv_duplicates(self, request, queryset):
+        freed = 0
+        for obj in queryset:
+            episoderesources = obj.episoderesource_set.all()
+            has_dl_episoderesources = episoderesources.filter(file_res__file_source='dl').exists()
+            if has_dl_episoderesources and episoderesources.count() > 1:
+                sources = []
+                tv_episoderesources = episoderesources.filter(file_res__file_source='tv')
+                print "Deleting"
+                for tver in tv_episoderesources:
+                    print "  - ", tver.file_res.show_storage, tver.file_res.file_size, tver.file_res.file_path
+                    freed += tver.file_res.file_size
+                    tver.delete_from_disk()
+
+        self.message_user(request, u"Freed %(freed)s" % {
+            'freed': filesizeformat(freed)
+        })
 
     def delete_smaller_duplicates(self, request, queryset):
         freed_by_disk = {}

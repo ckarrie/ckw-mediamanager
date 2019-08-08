@@ -1,20 +1,16 @@
+import glob
+import os
 import re
+import shutil
 from collections import OrderedDict
-from itertools import chain
 
+from django.apps import apps
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres import search
 from django.db import models
-from django.utils import timezone
-
-from django.apps import apps
-
-import glob
-import os
-import shutil
-
 from django.template.defaultfilters import filesizeformat, slugify
+from django.utils import timezone
 
 from mediamanager import fileutils
 
@@ -249,6 +245,14 @@ class Show(models.Model):
         for scraper in self.scrapers.all():
             scraper.process_show(show=self)
 
+    def read_showstorages(self):
+        results = OrderedDict()
+        for showstorage in self.showstorage_set.all():
+            print " - Looking up Files in", showstorage
+            ss_results = showstorage.scan_files(read_metadata=True)
+            results[showstorage] = ss_results
+        return results
+
     def auto_assign(self):
         matched_show_fileresources = FileResource.objects.annotate(
             md_title_similarity=search.TrigramSimilarity(
@@ -286,7 +290,7 @@ class Movie(models.Model):
         return self.name
 
     class Meta:
-        ordering = ('name', )
+        ordering = ('name',)
 
 
 class ShowStorage(models.Model):
@@ -305,6 +309,26 @@ class ShowStorage(models.Model):
             'fileresources': []
         }
 
+        dl_keywords = [
+            '.WEBDL.',
+            '.WEB-DL.',
+            '.x264-',
+            '.x264.',
+            '.h264-',
+            '.h264.',
+            '.DUBBED.',
+            '.SUBBED.',
+            '.GERMAN.',
+            '.1080p.',
+            '.720p.',
+            '.DVD.',
+            '.BLURAY.',
+            '.AmazonHD.',
+            '.NetflixHD.',
+            '.WEBRIP.',
+        ]
+        dl_keywords = [kw.lower() for kw in dl_keywords]
+
         videofiles = []
         if limit_filename:
             videofile = os.path.join(self.path, limit_filename)
@@ -318,10 +342,17 @@ class ShowStorage(models.Model):
                     videofiles.append(videofile)
 
         for videofile in videofiles:
+            videofile_filename = os.path.basename(videofile).lower()
+            fr_source = 'tv'
+            for kw in dl_keywords:
+                if kw in videofile_filename:
+                    fr_source = 'dl'
+
             fr, fr_created = FileResource.objects.get_or_create(
                 file_path=videofile,
                 defaults={
-                    'show_storage': self
+                    'show_storage': self,
+                    'file_source': fr_source
                 }
             )
             results['fileresources'].append(fr)
@@ -466,7 +497,7 @@ class Scraper(models.Model):
                 ).order_by('-similarity')
 
                 first_match = orig_name_matched_episodes.filter(similarity__gt=assign_similarity).first()
-                #print "Matched FS.de orig_title", orig_name, "with ShowEpisode", orig_name_matched_episodes, first_match
+                # print "Matched FS.de orig_title", orig_name, "with ShowEpisode", orig_name_matched_episodes, first_match
                 if first_match:
                     matched_cnt += 1
                     first_match.name = episode_dict['title']
@@ -589,8 +620,7 @@ class ShowEpisode(models.Model):
                     if not file_deleted:
                         failed_deleted_files.append(small)
 
-
-        #print "small_frs", small_frs
+        # print "small_frs", small_frs
         return freed_disk_space_by_discs, failed_deleted_files
 
     def delete_greatest_duplicate(self):
@@ -608,6 +638,10 @@ class ShowEpisode(models.Model):
 class FileResource(models.Model):
     file_path = models.CharField(max_length=500, unique=True)
     file_size = models.BigIntegerField(default=-1)
+    file_source = models.CharField(default='tv', max_length=2, choices=(
+        ('tv', 'TV (recorded)'),
+        ('dl', 'Web (downloaded)'),
+    ))
     md_title = models.CharField(max_length=255, null=True, blank=True)
     md_duration = models.BigIntegerField(default=-1)
     md_video_width = models.IntegerField(default=-1)
@@ -739,11 +773,28 @@ class FileResource(models.Model):
 
         if matched_show:
             fn = self.get_basename()
+
+            seas_ep_match = re.findall(r"(?:s|season|-)(\d{2})(?:e|x|episode|\n)(\d{2})", fn, re.I)
+            if seas_ep_match:
+                season_int = int(seas_ep_match[0][0])
+                episode_int = int(seas_ep_match[0][1])
+                matched_episode = ShowEpisode.objects.filter(season__show=matched_show, season__nr=season_int, nr=episode_int).first()
+                if matched_episode:
+                    episode_resource, er_created = EpisodeResource.objects.get_or_create(
+                        episode=matched_episode,
+                        file_res=self,
+                        defaults={
+                            'match_similarity': 1,
+                            'match_method': u'v3,assign_by_filename'
+                        }
+                    )
+                    return episode_resource
+
             seps = [
                 u' (odc. ',
                 u'x',
                 u'-afl ',  # hollandse, KetOp12
-                u'-ep ',   # french, Boomerang
+                u'-ep ',  # french, Boomerang
             ]
             part_a, part_b = None, None
             for sep in seps:
@@ -886,74 +937,83 @@ class FileResource(models.Model):
                         )
                         results['episode_resources'].append(er)
 
-        if self.md_summary or (self.md_duration > 0 and self.md_title):
+        if self.file_source == 'dl':
             if self.show_storage:
                 matched_show = self.show_storage.show
+                if not self.episoderesource_set.exists():
+                    matched_er_by_fn = self.assign_by_filename()
+                    if matched_er_by_fn:
+                        results['episode_resources'].append(matched_er_by_fn)
 
-            if not matched_show:
-                print "=== Looking up Show ==="
-                print self.md_title
-                vector = search.SearchVector('name')
-                query = search.SearchQuery(self.md_title)
-                matched_shows_sr = Show.objects.annotate(
-                    rank=search.SearchRank(
-                        vector, query)).order_by('-rank')
-                matched_shows_sim = Show.objects.annotate(
-                    similarity=search.TrigramSimilarity(
-                        'name', self.md_title)).filter(similarity__gt=0.8).order_by('-similarity')
+        else:
+            if self.md_summary or (self.md_duration > 0 and self.md_title):
+                if self.show_storage:
+                    matched_show = self.show_storage.show
 
-                print "  SearchRank", matched_shows_sr
-                print "  TrigramSimilarity", matched_shows_sim
+                if not matched_show:
+                    print "=== Looking up Show ==="
+                    print self.md_title
+                    vector = search.SearchVector('name')
+                    query = search.SearchQuery(self.md_title)
+                    matched_shows_sr = Show.objects.annotate(
+                        rank=search.SearchRank(
+                            vector, query)).order_by('-rank')
+                    matched_shows_sim = Show.objects.annotate(
+                        similarity=search.TrigramSimilarity(
+                            'name', self.md_title)).filter(similarity__gt=0.8).order_by('-similarity')
 
-                if matched_shows_sim.count() == 1:
-                    matched_show = matched_shows_sim.first()
+                    print "  SearchRank", matched_shows_sr
+                    print "  TrigramSimilarity", matched_shows_sim
 
-            if matched_show:
-                query_names_md_summary = []
-                query_names_md_description = []
-                if matched_show.auto_assign_multiep:
-                    if self.md_summary and matched_show.auto_assign_multiep_sep in self.md_summary:
-                        query_names_md_summary.extend(self.md_summary.split(matched_show.auto_assign_multiep_sep))
-                    if self.md_description and matched_show.auto_assign_multiep_sep in self.md_description:
-                        query_names_md_description.extend(self.md_description.split(matched_show.auto_assign_multiep_sep))
+                    if matched_shows_sim.count() == 1:
+                        matched_show = matched_shows_sim.first()
 
-                if not query_names_md_summary:
-                    query_names_md_summary = [self.md_summary]
+                if matched_show:
+                    query_names_md_summary = []
+                    query_names_md_description = []
+                    if matched_show.auto_assign_multiep:
+                        if self.md_summary and matched_show.auto_assign_multiep_sep in self.md_summary:
+                            query_names_md_summary.extend(self.md_summary.split(matched_show.auto_assign_multiep_sep))
+                        if self.md_description and matched_show.auto_assign_multiep_sep in self.md_description:
+                            query_names_md_description.extend(self.md_description.split(matched_show.auto_assign_multiep_sep))
 
-                if not query_names_md_description:
-                    query_names_md_description = [self.md_description]
+                    if not query_names_md_summary:
+                        query_names_md_summary = [self.md_summary]
 
-                for qn in query_names_md_summary:
-                    lookup_query_name(file_res=self, query_name=qn, query_by='md_summary', fallback=True)
+                    if not query_names_md_description:
+                        query_names_md_description = [self.md_description]
 
-                if not results['episode_resources']:
-                    for qn in query_names_md_description:
-                        lookup_query_name(file_res=self, query_name=qn, query_by='md_description', fallback=False)
+                    for qn in query_names_md_summary:
+                        lookup_query_name(file_res=self, query_name=qn, query_by='md_summary', fallback=True)
 
-        if not self.episoderesource_set.exists():
-            matched_er_by_fn = self.assign_by_filename()
-            if matched_er_by_fn:
-                results['episode_resources'].append(matched_er_by_fn)
+                    if not results['episode_resources']:
+                        for qn in query_names_md_description:
+                            lookup_query_name(file_res=self, query_name=qn, query_by='md_description', fallback=False)
 
-        file_similarity_thresold = 0.5
-        if not self.episoderesource_set.filter(match_similarity__gte=file_similarity_thresold).exists():
-            matched_er_by_title_in_fn = self.assign_by_title_in_filename()
-            if matched_er_by_title_in_fn:
-                results['episode_resources'].append(matched_er_by_title_in_fn)
+            if not self.episoderesource_set.exists():
+                matched_er_by_fn = self.assign_by_filename()
+                if matched_er_by_fn:
+                    results['episode_resources'].append(matched_er_by_fn)
 
-        # cleanup lower episode resources
-        if matched_show and not matched_show.auto_assign_multiep:
-            ordered_ers = self.episoderesource_set.all().order_by('-match_similarity')
-            if ordered_ers.count() > 1:
-                cleanuped_ers = 0
-                top_match = ordered_ers.first()
-                other_ers = ordered_ers.exclude(pk=top_match.pk)
-                for other in other_ers:
-                    other.delete()
-                    cleanuped_ers += 1
+            file_similarity_thresold = 0.5
+            if not self.episoderesource_set.filter(match_similarity__gte=file_similarity_thresold).exists():
+                matched_er_by_title_in_fn = self.assign_by_title_in_filename()
+                if matched_er_by_title_in_fn:
+                    results['episode_resources'].append(matched_er_by_title_in_fn)
 
-                results['episode_resources'] = [top_match]
-                results['cleanuped_ers'] = cleanuped_ers
+            # cleanup lower episode resources
+            if matched_show and not matched_show.auto_assign_multiep:
+                ordered_ers = self.episoderesource_set.all().order_by('-match_similarity')
+                if ordered_ers.count() > 1:
+                    cleanuped_ers = 0
+                    top_match = ordered_ers.first()
+                    other_ers = ordered_ers.exclude(pk=top_match.pk)
+                    for other in other_ers:
+                        other.delete()
+                        cleanuped_ers += 1
+
+                    results['episode_resources'] = [top_match]
+                    results['cleanuped_ers'] = cleanuped_ers
 
         return results
 
@@ -997,6 +1057,7 @@ class EpisodeResource(models.Model):
 
     def is_renamed(self):
         return self.get_rename_filename() in self.file_res.get_basename()
+
     is_renamed.boolean = True
 
     def delete_from_disk(self):

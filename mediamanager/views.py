@@ -6,6 +6,10 @@ import models
 import admin
 
 
+class HomeView(generic.TemplateView):
+    template_name = 'mediamanager/home.html'
+
+
 class RecordingEndpointView(generic.TemplateView):
     template_name = 'mediamanager/rec_endpoint.html'
 
