@@ -6,15 +6,15 @@ Media Manager
 3. `(mediamanager) christian@nzxt:~/workspace/venvs/mediamanager$ pip install django==1.11.9`
 
 
-Screenshots:
+== Screenshots: ==
 
-![Shows](showepisodes.png)
+List your DVR recorded TV shows:
 
-List your DVR recorded TV shows
+![Shows](shows.png)
+
+List your Episodes:
 
 ![Episodes](showepisodes.png)
-
-List your Episodes
 
 
 Start:
