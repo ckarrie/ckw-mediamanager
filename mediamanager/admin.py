@@ -1,4 +1,5 @@
 from django.contrib import admin, messages
+from django.db.models import Sum
 from django.template.defaultfilters import truncatechars, filesizeformat
 from django.urls import reverse
 from django.utils.safestring import mark_safe
@@ -63,9 +64,24 @@ class StorageDiskAdmin(admin.ModelAdmin):
                         showstorage.save()
 
 
-
 class StorageFolderAdmin(admin.ModelAdmin):
-    list_display = ['disk', 'contains', 'path']
+    list_display = ['disk', 'contains', 'path', 'is_online', 'get_free_size', 'get_disk_usage_size', 'get_fr_usage_size']
+
+    def is_online(self, obj):
+        return obj.is_online()
+    is_online.boolean = True
+
+    def get_free_size(self, obj):
+        return obj.get_free_size()
+
+    def get_disk_usage_size(self, obj):
+        return filesizeformat(obj.get_usage_size())
+
+    def get_fr_usage_size(self, obj):
+        sum_filesize_qs = models.FileResource.objects.filter(show_storage__storagefolder=obj).aggregate(sum_filesize=Sum('file_size'))
+        sum_filesize = sum_filesize_qs.get('sum_filesize', 0)
+        return filesizeformat(sum_filesize)
+
 
 
 class ShowStorageAdmin(admin.ModelAdmin):
@@ -100,7 +116,7 @@ class FileResourceAdmin(admin.ModelAdmin):
     list_display = [
         'id', 'file_source',
         'get_basename', 'get_disk', 'get_size_display', 'file_size',
-        'md_title', 'md_duration', 'md_summary', 'md_summary_raw_icon', 'has_episoderesource', 'md_duration_text', 'running_tasks', 'er_list'
+        'md_title', 'md_duration', 'md_summary', 'md_summary_raw_icon', 'has_episoderesource', 'md_duration_text', 'running_tasks', 'er_list', 'created_at'
     ]
 
     list_editable = ['md_summary']

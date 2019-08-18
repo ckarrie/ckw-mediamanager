@@ -224,6 +224,15 @@ class StorageFolder(models.Model):
     def __unicode__(self):
         return self.path
 
+    def is_online(self):
+        return os.path.exists(self.path)
+
+    def get_usage_size(self):
+        return fileutils.get_path_size(start_path=self.path)
+
+    def get_free_size(self):
+        return 0
+
     class Meta:
         ordering = ('disk', 'contains')
 
@@ -650,6 +659,7 @@ class FileResource(models.Model):
     md_summary_raw = models.TextField(null=True, blank=True)
     md_channel = models.CharField(max_length=500, null=True, blank=True)
     md_description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True, auto_now_add=True)
 
     show_storage = models.ForeignKey(ShowStorage, null=True, blank=True)
     """
@@ -1023,7 +1033,7 @@ class FileResource(models.Model):
             try:
                 os.remove(self.file_path)
                 deleted = True
-            except IOError:
+            except (IOError, OSError):
                 pass
         return deleted
 
@@ -1079,11 +1089,14 @@ class EpisodeResource(models.Model):
             ext = ext.lower()
             new_basename = new_fn + ext
             new_file_path = os.path.join(res.get_folder(), new_basename)
-
-            shutil.move(res.file_path, new_file_path)
-            res.file_path = new_file_path
-            res.save()
-            renamed = True
+            try:
+                os.rename(res.file_path, new_file_path)
+                # shutil.move(res.file_path, new_file_path)
+                res.file_path = new_file_path
+                res.save()
+                renamed = True
+            except OSError:
+                pass
 
         return {
             'file_exists': file_exists,
