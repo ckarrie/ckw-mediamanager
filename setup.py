@@ -17,7 +17,7 @@ setup(
     url='http://ccm.app/',
     packages=['mediamanager'],
     install_requires=[
-        'django<=1.11.9',
+        'django>=2.2.24',
         'requests',
         'tvdb_api',
         'enzyme',
